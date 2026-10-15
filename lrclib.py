@@ -1,7 +1,54 @@
+import re
 import time
+from urllib.parse import urlparse
+
+import requests
 
 from search import search
 from chooser import choose
+
+TRACK_API = "https://lrclib.net/api/get"
+
+
+def fetch_track_url(url):
+    """
+    Fetch one exact LRCLIB track by URL, bypassing search and match scoring.
+
+    Accepts public track URLs such as https://lrclib.net/tracks/39180465.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.netloc.lower() not in {
+        "lrclib.net", "www.lrclib.net"
+    }:
+        raise ValueError("Expected an https://lrclib.net/tracks/<id> URL.")
+
+    match = re.fullmatch(r"/tracks/(\d+)/?", parsed.path)
+    if not match:
+        raise ValueError("Expected a track URL like https://lrclib.net/tracks/39180465.")
+
+    track_id = match.group(1)
+    response = requests.get(
+        f"{TRACK_API}/{track_id}",
+        timeout=15,
+        headers={"User-Agent": "LRCLib-Syncer/1.0"},
+    )
+    response.raise_for_status()
+    item = response.json()
+
+    lyrics = item.get("syncedLyrics") or item.get("plainLyrics")
+    if not lyrics:
+        return None
+
+    return {
+        "title": item.get("trackName"),
+        "artist": item.get("artistName"),
+        "album": item.get("albumName"),
+        "duration": item.get("duration"),
+        "lyrics": lyrics,
+        "synced": bool(item.get("syncedLyrics")),
+        "instrumental": item.get("instrumental", False),
+        "lrclib_id": item.get("id"),
+    }
 
 
 def fetch(title, artist, duration=None, album=None, interactive=False):
