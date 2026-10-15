@@ -28,7 +28,8 @@ def fetch_track_url(url):
 
     track_id = match.group(1)
     response = requests.get(
-        f"{TRACK_API}/{track_id}",
+        TRACK_API,
+        params={"id": track_id},
         timeout=15,
         headers={"User-Agent": "LRCLib-Syncer/1.0"},
     )
