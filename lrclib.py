@@ -28,10 +28,9 @@ def fetch_track_url(url):
 
     track_id = match.group(1)
     response = requests.get(
-        TRACK_API,
-        params={"id": track_id},
+        f"{TRACK_API}/{track_id}",
         timeout=15,
-        headers={"User-Agent": "LRCLib-Syncer/1.0"},
+        headers={"User-Agent": "LRCLib-Syncer/1.0 (https://github.com/thedinyamum/LRCLib-Syncer)"},
     )
     response.raise_for_status()
     item = response.json()
