@@ -4,9 +4,10 @@ from pathlib import Path
 import argparse
 from threading import Lock, Semaphore
 
+import requests
 
 from metadata import read
-from lrclib import fetch
+from lrclib import fetch, fetch_track_url
 from normalize import normalize
 from cache import LyricsCache
 from embed import embed
@@ -17,7 +18,6 @@ AUDIO_EXTS = {
     ".flac", ".mp3", ".m4a", ".aac",
     ".ogg", ".opus", ".wav"
 }
-
 
 cache = LyricsCache()
 
@@ -78,14 +78,8 @@ def process(path, missing, instrumentals, stats, interactive=False,):
         return
 
     lyrics = result["lyrics"]
+    path.with_suffix(".lrc").write_text(lyrics, encoding="utf-8")
 
-    # Save LRC
-    path.with_suffix(".lrc").write_text(
-        lyrics,
-        encoding="utf-8"
-    )
-
-    # Embed
     if embed(path, lyrics):
         with stats_lock:
             stats["embedded"] += 1
@@ -96,6 +90,29 @@ def process(path, missing, instrumentals, stats, interactive=False,):
             stats["synced"] += 1
         else:
             stats["plain"] += 1
+
+
+def write_result(path, result):
+    """Write a fetched result to an LRC sidecar and the audio file."""
+    if result is None:
+        print("No lyrics found at that LRCLIB track.")
+        return False
+
+    if result.get("instrumental"):
+        print("LRCLIB marks this track as instrumental; no lyrics written.")
+        return False
+
+    lyrics = result["lyrics"]
+    lrc_path = path.with_suffix(".lrc")
+    lrc_path.write_text(lyrics, encoding="utf-8")
+
+    if embed(path, lyrics):
+        print("✓ Embedded lyrics")
+    else:
+        print("⚠ Could not embed lyrics into this format; saved the .lrc file.")
+
+    print(f"✓ Wrote {lrc_path.name}")
+    return True
 
 
 def scan(folder, interactive=False):
@@ -168,7 +185,18 @@ def main():
         "--alt-search",
         nargs=3,
         metavar=("TITLE", "ARTIST", "FILE"),
-        help="Download lyrics for a single file using a custom title and artist."
+        help="Search lyrics for one file using a custom title and artist."
+    )
+
+    group.add_argument(
+        "--force-url",
+        nargs=2,
+        metavar=("LRCLIB_URL", "FILE"),
+        help=(
+            "Fetch an exact LRCLIB track URL (for example "
+            "https://lrclib.net/tracks/39180465) and write its lyrics "
+            "to the specified audio file, bypassing search."
+        ),
     )
 
     parser.add_argument(
@@ -179,16 +207,47 @@ def main():
 
     args = parser.parse_args()
 
-    if args.alt_search:
-        title, artist, filename = args.alt_search
-
+    if args.force_url:
+        url, filename = args.force_url
         path = Path(filename).expanduser().resolve()
 
-        if not path.exists():
+        if not path.is_file():
             parser.error(f"File does not exist: {path}")
 
         info = read(path)
+        if info is None:
+            parser.error("Unsupported audio file.")
 
+        try:
+            with network_limit:
+                result = fetch_track_url(url)
+        except (ValueError, requests.RequestException) as exc:
+            parser.error(f"Could not fetch LRCLIB track: {exc}")
+
+        if write_result(path, result):
+            file_title = normalize(info["title"])
+            file_artist = normalize(info["artist"])
+            if file_title and file_artist:
+                cache.put(file_artist, file_title, result)
+                cache.save()
+
+            missing_file = Path("lyrics_missing.txt")
+            if missing_file.exists() and file_title and file_artist:
+                target = f"{file_artist} - {file_title}"
+                lines = [
+                    line for line in missing_file.read_text(encoding="utf-8").splitlines()
+                    if normalize(line) != normalize(target)
+                ]
+                missing_file.write_text("\n".join(lines), encoding="utf-8")
+
+    elif args.alt_search:
+        title, artist, filename = args.alt_search
+        path = Path(filename).expanduser().resolve()
+
+        if not path.is_file():
+            parser.error(f"File does not exist: {path}")
+
+        info = read(path)
         if info is None:
             parser.error("Unsupported audio file.")
 
@@ -201,56 +260,25 @@ def main():
                 interactive=args.interactive,
             )
 
-        if result is None:
-            print("No lyrics found.")
-            return
+        if write_result(path, result):
+            file_title = normalize(info["title"])
+            file_artist = normalize(info["artist"])
+            if file_title and file_artist:
+                cache.put(file_artist, file_title, result)
+                cache.save()
 
-        lyrics = result["lyrics"]
-
-        # Save under the FILE'S metadata, not the manual search query.
-        file_title = normalize(info["title"])
-        file_artist = normalize(info["artist"])
-
-        cache.put(
-            file_artist,
-            file_title,
-            result,
-        )
-        cache.save()
-
-        # Write .lrc
-        path.with_suffix(".lrc").write_text(
-            lyrics,
-            encoding="utf-8"
-        )
-
-        # Embed
-        if embed(path, lyrics):
-            print("✓ Embedded lyrics")
-
-        # Remove from lyrics_missing.txt if present.
-        missing_file = Path("lyrics_missing.txt")
-
-        if missing_file.exists():
-            target = f"{file_artist} - {file_title}"
-
-            lines = [
-                line
-                for line in missing_file.read_text(
-                    encoding="utf-8"
-                ).splitlines()
-                if normalize(line) != target
-            ]
-
-            missing_file.write_text(
-                "\n".join(lines),
-                encoding="utf-8",
-            )
-
-        print(f"✓ Wrote {path.with_suffix('.lrc').name}")
+            missing_file = Path("lyrics_missing.txt")
+            if missing_file.exists():
+                target = f"{file_artist} - {file_title}"
+                lines = [
+                    line for line in missing_file.read_text(encoding="utf-8").splitlines()
+                    if normalize(line) != normalize(target)
+                ]
+                missing_file.write_text("\n".join(lines), encoding="utf-8")
 
     else:
-        scan(args.folder,interactive=args.interactive,)
+        scan(args.folder, interactive=args.interactive)
+
 
 if __name__ == "__main__":
     main()
